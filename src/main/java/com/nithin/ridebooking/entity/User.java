@@ -39,4 +39,6 @@ public class User {
     void onCreate() {
         this.createdAt = LocalDateTime.now();
     }
+
+
 }
