@@ -8,6 +8,7 @@ import com.nithin.ridebooking.exception.ResourceNotFoundException;
 import com.nithin.ridebooking.repository.RideRepository;
 import com.nithin.ridebooking.repository.UserRepository;
 import lombok.RequiredArgsConstructor;
+import org.springframework.security.access.AccessDeniedException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -19,10 +20,8 @@ public class RideService {
     private final UserRepository userRepository;
 
     @Transactional
-    public RideResponse bookRide(RideRequest request) {
-        User rider = userRepository.findById(request.riderId())
-                .orElseThrow(() -> new ResourceNotFoundException(
-                        "User not found with id " + request.riderId()));
+    public RideResponse bookRide(String email, RideRequest request) {
+        User rider = findUser(email);
 
         if (rider.getRole() != Role.RIDER) {
             throw new BadRequestException("Only riders can book rides");
@@ -43,13 +42,25 @@ public class RideService {
     }
 
     @Transactional(readOnly = true)
-    public RideResponse getRide(Long id) {
-        return toResponse(findRide(id));
+    public RideResponse getRide(String email, Long id) {
+        User caller = findUser(email);
+        Ride ride = findRide(id);
+
+        if (!canView(caller, ride)) {
+            throw new AccessDeniedException("You are not allowed to view this ride");
+        }
+        return toResponse(ride);
     }
 
     @Transactional
-    public RideResponse cancelRide(Long id) {
+    public RideResponse cancelRide(String email, Long id) {
+        User caller = findUser(email);
         Ride ride = findRide(id);
+
+        boolean isOwner = ride.getRider().getId().equals(caller.getId());
+        if (!isOwner && caller.getRole() != Role.ADMIN) {
+            throw new AccessDeniedException("You are not allowed to cancel this ride");
+        }
 
         if (ride.getStatus() != RideStatus.REQUESTED
                 && ride.getStatus() != RideStatus.ACCEPTED) {
@@ -59,6 +70,18 @@ public class RideService {
 
         ride.setStatus(RideStatus.CANCELLED);
         return toResponse(rideRepository.save(ride));
+    }
+
+    private boolean canView(User caller, Ride ride) {
+        if (caller.getRole() == Role.ADMIN) return true;
+        if (ride.getRider().getId().equals(caller.getId())) return true;
+        return ride.getDriver() != null
+                && ride.getDriver().getUser().getId().equals(caller.getId());
+    }
+
+    private User findUser(String email) {
+        return userRepository.findByEmail(email)
+                .orElseThrow(() -> new ResourceNotFoundException("User not found: " + email));
     }
 
     private Ride findRide(Long id) {
