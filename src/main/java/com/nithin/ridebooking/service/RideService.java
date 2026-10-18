@@ -3,16 +3,19 @@ package com.nithin.ridebooking.service;
 import com.nithin.ridebooking.dto.FareEstimate;
 import com.nithin.ridebooking.dto.RideRequest;
 import com.nithin.ridebooking.dto.RideResponse;
+import com.nithin.ridebooking.dto.RideStatusMessage;
 import com.nithin.ridebooking.entity.*;
 import com.nithin.ridebooking.exception.BadRequestException;
 import com.nithin.ridebooking.exception.ResourceNotFoundException;
 import com.nithin.ridebooking.repository.RideRepository;
 import com.nithin.ridebooking.repository.UserRepository;
 import lombok.RequiredArgsConstructor;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.security.access.AccessDeniedException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.time.Instant;
 import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Optional;
@@ -28,6 +31,7 @@ public class RideService {
     private final UserRepository userRepository;
     private final FareService fareService;
     private final MatchingService matchingService;
+    private final ApplicationEventPublisher eventPublisher;
 
     @Transactional
     public RideResponse bookRide(String email, RideRequest request) {
@@ -61,7 +65,9 @@ public class RideService {
                 .status(match.isPresent() ? RideStatus.ACCEPTED : RideStatus.REQUESTED)
                 .build();
 
-        return toResponse(rideRepository.save(ride));
+        Ride saved = rideRepository.save(ride);
+        publishStatus(saved);
+        return toResponse(saved);
     }
 
     @Transactional(readOnly = true)
@@ -73,6 +79,14 @@ public class RideService {
             throw new AccessDeniedException("You are not allowed to view this ride");
         }
         return toResponse(ride);
+    }
+
+    @Transactional(readOnly = true)
+    public boolean isParticipant(String email, Long rideId) {
+        return userRepository.findByEmail(email)
+                .flatMap(user -> rideRepository.findById(rideId)
+                        .map(ride -> canView(user, ride)))
+                .orElse(false);
     }
 
     @Transactional
@@ -92,11 +106,13 @@ public class RideService {
         }
 
         if (ride.getDriver() != null) {
-            ride.getDriver().setAvailable(true);   // free the driver again
+            ride.getDriver().setAvailable(true);
         }
 
         ride.setStatus(RideStatus.CANCELLED);
-        return toResponse(rideRepository.save(ride));
+        Ride saved = rideRepository.save(ride);
+        publishStatus(saved);
+        return toResponse(saved);
     }
 
     @Transactional
@@ -111,7 +127,9 @@ public class RideService {
         }
 
         ride.setStatus(RideStatus.IN_PROGRESS);
-        return toResponse(rideRepository.save(ride));
+        Ride saved = rideRepository.save(ride);
+        publishStatus(saved);
+        return toResponse(saved);
     }
 
     @Transactional
@@ -128,13 +146,26 @@ public class RideService {
         ride.setStatus(RideStatus.COMPLETED);
         ride.setCompletedAt(LocalDateTime.now());
 
-        // Driver is free again, and is now at the drop-off point
         Driver driver = ride.getDriver();
         driver.setAvailable(true);
         driver.setCurrentLatitude(ride.getDropLatitude());
         driver.setCurrentLongitude(ride.getDropLongitude());
 
-        return toResponse(rideRepository.save(ride));
+        Ride saved = rideRepository.save(ride);
+        publishStatus(saved);
+        return toResponse(saved);
+    }
+
+    private void publishStatus(Ride ride) {
+        Driver d = ride.getDriver();
+        eventPublisher.publishEvent(new RideStatusMessage(
+                ride.getId(),
+                ride.getStatus(),
+                d != null ? d.getId() : null,
+                d != null ? d.getUser().getName() : null,
+                d != null ? d.getVehicleModel() : null,
+                d != null ? d.getVehicleNumber() : null,
+                Instant.now().toString()));
     }
 
     private void assertAssignedDriver(User caller, Ride ride) {

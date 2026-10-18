@@ -1,0 +1,66 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Ride WebSocket Test</title>
+</head>
+<body style="font-family:sans-serif;max-width:720px;margin:20px auto">
+  <h3>Ride live updates (test page)</h3>
+  <p><input id="token" size="90" placeholder="Paste JWT token"></p>
+  <p>
+    Ride id: <input id="rideId" size="6">
+    <button onclick="connect()">Connect &amp; subscribe</button>
+    <button onclick="disconnect()">Disconnect</button>
+  </p>
+  <p>
+    Driver only: lat <input id="lat" size="9" value="12.9720">
+    lng <input id="lng" size="9" value="77.5950">
+    <button onclick="sendLocation()">Send location</button>
+  </p>
+  <pre id="log" style="background:#eee;padding:10px;height:300px;overflow:auto"></pre>
+
+  <script src="https://cdn.jsdelivr.net/npm/@stomp/stompjs@7.0.0/bundles/stomp.umd.min.js"></script>
+  <script>
+    let client;
+    const $ = id => document.getElementById(id);
+
+    function log(msg) {
+      const el = $('log');
+      el.textContent += new Date().toLocaleTimeString() + '  ' + msg + '\n';
+      el.scrollTop = el.scrollHeight;
+    }
+
+    function connect() {
+      const rideId = $('rideId').value.trim();
+      client = new StompJs.Client({
+        brokerURL: 'ws://' + location.host + '/ws',
+        connectHeaders: { Authorization: 'Bearer ' + $('token').value.trim() },
+        reconnectDelay: 0,
+        onConnect: () => {
+          log('CONNECTED');
+          client.subscribe('/user/queue/errors', m => log('ERROR: ' + m.body));
+          client.subscribe('/topic/rides/' + rideId + '/status', m => log('STATUS: ' + m.body));
+          client.subscribe('/topic/rides/' + rideId + '/location', m => log('LOCATION: ' + m.body));
+        },
+        onStompError: f => log('STOMP ERROR: ' + f.headers['message']),
+        onWebSocketClose: () => log('Socket closed')
+      });
+      client.activate();
+    }
+
+    function disconnect() {
+      if (client) client.deactivate();
+    }
+
+    function sendLocation() {
+      client.publish({
+        destination: '/app/rides/' + $('rideId').value.trim() + '/location',
+        body: JSON.stringify({
+          latitude: parseFloat($('lat').value),
+          longitude: parseFloat($('lng').value)
+        })
+      });
+    }
+  </script>
+</body>
+</html>
