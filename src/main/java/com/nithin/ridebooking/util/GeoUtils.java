@@ -6,6 +6,9 @@ public final class GeoUtils {
 
     private GeoUtils() {
     }
+    public static boolean isValidCoordinate(double lat, double lng) {
+        return lat >= -90 && lat <= 90 && lng >= -180 && lng <= 180;
+    }
 
     // Straight-line distance between two GPS points (Haversine formula)
     public static double distanceKm(double lat1, double lon1, double lat2, double lon2) {

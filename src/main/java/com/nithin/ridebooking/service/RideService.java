@@ -1,5 +1,6 @@
 package com.nithin.ridebooking.service;
 
+import com.nithin.ridebooking.dto.FareEstimate;
 import com.nithin.ridebooking.dto.RideRequest;
 import com.nithin.ridebooking.dto.RideResponse;
 import com.nithin.ridebooking.entity.*;
@@ -12,12 +13,21 @@ import org.springframework.security.access.AccessDeniedException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.time.LocalDateTime;
+import java.util.List;
+import java.util.Optional;
+
 @Service
 @RequiredArgsConstructor
 public class RideService {
 
+    private static final List<RideStatus> ACTIVE_STATUSES =
+            List.of(RideStatus.REQUESTED, RideStatus.ACCEPTED, RideStatus.IN_PROGRESS);
+
     private final RideRepository rideRepository;
     private final UserRepository userRepository;
+    private final FareService fareService;
+    private final MatchingService matchingService;
 
     @Transactional
     public RideResponse bookRide(String email, RideRequest request) {
@@ -26,16 +36,29 @@ public class RideService {
         if (rider.getRole() != Role.RIDER) {
             throw new BadRequestException("Only riders can book rides");
         }
+        if (rideRepository.existsByRiderIdAndStatusIn(rider.getId(), ACTIVE_STATUSES)) {
+            throw new BadRequestException("You already have an active ride");
+        }
+
+        FareEstimate fare = fareService.estimate(
+                request.pickupLatitude(), request.pickupLongitude(),
+                request.dropLatitude(), request.dropLongitude());
+
+        Optional<Driver> match = matchingService.findAndClaimNearestDriver(
+                request.pickupLatitude(), request.pickupLongitude());
 
         Ride ride = Ride.builder()
                 .rider(rider)
+                .driver(match.orElse(null))
                 .pickupAddress(request.pickupAddress())
                 .pickupLatitude(request.pickupLatitude())
                 .pickupLongitude(request.pickupLongitude())
                 .dropAddress(request.dropAddress())
                 .dropLatitude(request.dropLatitude())
                 .dropLongitude(request.dropLongitude())
-                .status(RideStatus.REQUESTED)
+                .distanceKm(fare.distanceKm())
+                .fare(fare.total())
+                .status(match.isPresent() ? RideStatus.ACCEPTED : RideStatus.REQUESTED)
                 .build();
 
         return toResponse(rideRepository.save(ride));
@@ -68,8 +91,58 @@ public class RideService {
                     "Ride cannot be cancelled when status is " + ride.getStatus());
         }
 
+        if (ride.getDriver() != null) {
+            ride.getDriver().setAvailable(true);   // free the driver again
+        }
+
         ride.setStatus(RideStatus.CANCELLED);
         return toResponse(rideRepository.save(ride));
+    }
+
+    @Transactional
+    public RideResponse startRide(String email, Long id) {
+        User caller = findUser(email);
+        Ride ride = findRide(id);
+        assertAssignedDriver(caller, ride);
+
+        if (ride.getStatus() != RideStatus.ACCEPTED) {
+            throw new BadRequestException(
+                    "Ride cannot be started when status is " + ride.getStatus());
+        }
+
+        ride.setStatus(RideStatus.IN_PROGRESS);
+        return toResponse(rideRepository.save(ride));
+    }
+
+    @Transactional
+    public RideResponse completeRide(String email, Long id) {
+        User caller = findUser(email);
+        Ride ride = findRide(id);
+        assertAssignedDriver(caller, ride);
+
+        if (ride.getStatus() != RideStatus.IN_PROGRESS) {
+            throw new BadRequestException(
+                    "Ride cannot be completed when status is " + ride.getStatus());
+        }
+
+        ride.setStatus(RideStatus.COMPLETED);
+        ride.setCompletedAt(LocalDateTime.now());
+
+        // Driver is free again, and is now at the drop-off point
+        Driver driver = ride.getDriver();
+        driver.setAvailable(true);
+        driver.setCurrentLatitude(ride.getDropLatitude());
+        driver.setCurrentLongitude(ride.getDropLongitude());
+
+        return toResponse(rideRepository.save(ride));
+    }
+
+    private void assertAssignedDriver(User caller, Ride ride) {
+        boolean assigned = ride.getDriver() != null
+                && ride.getDriver().getUser().getId().equals(caller.getId());
+        if (!assigned) {
+            throw new AccessDeniedException("Only the assigned driver can do this");
+        }
     }
 
     private boolean canView(User caller, Ride ride) {
@@ -90,11 +163,15 @@ public class RideService {
     }
 
     private RideResponse toResponse(Ride ride) {
+        Driver d = ride.getDriver();
         return new RideResponse(
                 ride.getId(),
                 ride.getRider().getId(),
                 ride.getRider().getName(),
-                ride.getDriver() != null ? ride.getDriver().getId() : null,
+                d != null ? d.getId() : null,
+                d != null ? d.getUser().getName() : null,
+                d != null ? d.getVehicleModel() : null,
+                d != null ? d.getVehicleNumber() : null,
                 ride.getPickupAddress(),
                 ride.getDropAddress(),
                 ride.getStatus(),
