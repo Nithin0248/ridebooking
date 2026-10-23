@@ -16,7 +16,8 @@ import org.springframework.test.web.servlet.ResultActions;
 import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder;
 import org.springframework.test.web.servlet.setup.MockMvcBuilders;
 import org.springframework.web.context.WebApplicationContext;
-
+import com.nithin.ridebooking.repository.PaymentRepository;
+import com.nithin.ridebooking.repository.RatingRepository;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.springframework.security.test.web.servlet.setup.SecurityMockMvcConfigurers.springSecurity;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
@@ -38,7 +39,8 @@ class RideFlowIntegrationTest {
     @Autowired private RideRepository rideRepository;
     @Autowired private DriverRepository driverRepository;
     @Autowired private UserRepository userRepository;
-
+    @Autowired private RatingRepository ratingRepository;
+    @Autowired private PaymentRepository paymentRepository;
     @Value("${spring.datasource.url}")
     private String datasourceUrl;
 
@@ -52,14 +54,50 @@ class RideFlowIntegrationTest {
                 .startsWith("jdbc:h2:");
 
         mockMvc = MockMvcBuilders.webAppContextSetup(context).apply(springSecurity()).build();
-
+        ratingRepository.deleteAllInBatch();
+        paymentRepository.deleteAllInBatch();
         rideRepository.deleteAllInBatch();
         driverRepository.deleteAllInBatch();
         userRepository.deleteAllInBatch();
     }
 
     // ---------- the tests ----------
+    @Test
+    void ratingFlow_bothSidesRateOnceAndTheSummaryUpdates() throws Exception {
+        String riderToken = register("rider@test.com", "RIDER");
+        String driverToken = onlineDriver("near@test.com", "KA01AA0001", "DL-1", 12.9720, 77.5950);
 
+        String booked = doPost("/api/rides", riderToken, BOOKING)
+                .andExpect(status().isCreated())
+                .andReturn().getResponse().getContentAsString();
+        Number rideId = JsonPath.read(booked, "$.id");
+        Number driverId = JsonPath.read(booked, "$.driverId");
+
+        // not allowed before the ride is completed
+        doPost("/api/rides/" + rideId + "/rating", riderToken, "{\"stars\":5}")
+                .andExpect(status().isBadRequest());
+
+        doPut("/api/rides/" + rideId + "/start", driverToken, null).andExpect(status().isOk());
+        doPut("/api/rides/" + rideId + "/complete", driverToken, null).andExpect(status().isOk());
+
+        doPost("/api/rides/" + rideId + "/rating", riderToken, "{\"stars\":4,\"comment\":\"Nice and quick\"}")
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.stars").value(4));
+        doPost("/api/rides/" + rideId + "/rating", riderToken, "{\"stars\":5}")
+                .andExpect(status().isBadRequest());     // already rated
+        doPost("/api/rides/" + rideId + "/rating", driverToken, "{\"stars\":6}")
+                .andExpect(status().isBadRequest());     // 6 stars is invalid
+        doPost("/api/rides/" + rideId + "/rating", driverToken, "{\"stars\":5}")
+                .andExpect(status().isCreated());        // the driver can rate the rider
+
+        doGet("/api/drivers/" + driverId + "/rating", riderToken)
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.averageStars").value(4.0))
+                .andExpect(jsonPath("$.ratingCount").value(1));
+        doGet("/api/drivers/" + driverId + "/reviews", riderToken)
+                .andExpect(jsonPath("$.content[0].comment").value("Nice and quick"))
+                .andExpect(jsonPath("$.content[0].raterFirstName").value("Test"));
+    }
     @Test
     void fullRideFlow_bookStartComplete() throws Exception {
         String riderToken = register("rider@test.com", "RIDER");
