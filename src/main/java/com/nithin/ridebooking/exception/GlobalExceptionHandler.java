@@ -16,7 +16,10 @@ public class GlobalExceptionHandler {
     public ResponseEntity<Map<String, Object>> handleNotFound(ResourceNotFoundException ex) {
         return build(HttpStatus.NOT_FOUND, ex.getMessage());
     }
-
+    @ExceptionHandler(PaymentProviderException.class)
+    public ResponseEntity<Map<String, Object>> handlePaymentProvider(PaymentProviderException ex) {
+        return build(HttpStatus.BAD_GATEWAY, ex.getMessage());
+    }
     @ExceptionHandler(BadRequestException.class)
     public ResponseEntity<Map<String, Object>> handleBadRequest(BadRequestException ex) {
         return build(HttpStatus.BAD_REQUEST, ex.getMessage());
