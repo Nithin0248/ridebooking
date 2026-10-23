@@ -1,5 +1,8 @@
 package com.nithin.ridebooking.service;
-
+import com.nithin.ridebooking.dto.PageResponse;
+import org.mockito.ArgumentCaptor;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.Pageable;
 import com.nithin.ridebooking.dto.FareEstimate;
 import com.nithin.ridebooking.dto.RideRequest;
 import com.nithin.ridebooking.dto.RideResponse;
@@ -185,5 +188,31 @@ class RideServiceTest {
         assertThat(driver.isAvailable()).isTrue();
         assertThat(driver.getCurrentLatitude()).isEqualTo(12.9352);
         assertThat(driver.getCurrentLongitude()).isEqualTo(77.6245);
+    }
+    @Test
+    void historyCapsThePageSizeAndSortsNewestFirst() {
+        User rider = user(1L, "r@test.com", Role.RIDER);
+        when(userRepository.findByEmail("r@test.com")).thenReturn(Optional.of(rider));
+        when(rideRepository.findByRiderId(eq(1L), any(Pageable.class))).thenReturn(Page.empty());
+
+        PageResponse<RideResponse> result = rideService.history("r@test.com", null, 0, 1000);
+
+        ArgumentCaptor<Pageable> captor = ArgumentCaptor.forClass(Pageable.class);
+        verify(rideRepository).findByRiderId(eq(1L), captor.capture());
+        assertThat(captor.getValue().getPageSize()).isEqualTo(50);
+        assertThat(captor.getValue().getSort().getOrderFor("requestedAt").isDescending()).isTrue();
+        assertThat(result.content()).isEmpty();
+    }
+
+    @Test
+    void driverHistoryUsesTheRidesTheyDrove() {
+        User driverUser = user(2L, "d@test.com", Role.DRIVER);
+        when(userRepository.findByEmail("d@test.com")).thenReturn(Optional.of(driverUser));
+        when(rideRepository.findByDriverUserIdAndStatus(eq(2L), eq(RideStatus.COMPLETED), any(Pageable.class)))
+                .thenReturn(Page.empty());
+
+        rideService.history("d@test.com", RideStatus.COMPLETED, 0, 10);
+
+        verify(rideRepository).findByDriverUserIdAndStatus(eq(2L), eq(RideStatus.COMPLETED), any(Pageable.class));
     }
 }

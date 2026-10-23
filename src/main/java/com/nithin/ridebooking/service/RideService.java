@@ -14,7 +14,11 @@ import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.security.access.AccessDeniedException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
-
+import com.nithin.ridebooking.dto.PageResponse;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.PageRequest;
+import org.springframework.data.domain.Pageable;
+import org.springframework.data.domain.Sort;
 import java.time.Instant;
 import java.time.LocalDateTime;
 import java.util.List;
@@ -80,7 +84,27 @@ public class RideService {
         }
         return toResponse(ride);
     }
+    @Transactional(readOnly = true)
+    public PageResponse<RideResponse> history(String email, RideStatus status, int page, int size) {
+        User caller = findUser(email);
 
+        int safePage = Math.max(page, 0);
+        int safeSize = Math.min(Math.max(size, 1), 50);
+        Pageable pageable = PageRequest.of(safePage, safeSize, Sort.by(Sort.Direction.DESC, "requestedAt"));
+
+        Page<Ride> result;
+        if (caller.getRole() == Role.DRIVER) {
+            result = (status == null)
+                    ? rideRepository.findByDriverUserId(caller.getId(), pageable)
+                    : rideRepository.findByDriverUserIdAndStatus(caller.getId(), status, pageable);
+        } else {
+            result = (status == null)
+                    ? rideRepository.findByRiderId(caller.getId(), pageable)
+                    : rideRepository.findByRiderIdAndStatus(caller.getId(), status, pageable);
+        }
+
+        return PageResponse.from(result.map(this::toResponse));
+    }
     @Transactional(readOnly = true)
     public boolean isParticipant(String email, Long rideId) {
         return userRepository.findByEmail(email)

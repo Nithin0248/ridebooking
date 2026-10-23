@@ -12,7 +12,8 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.core.Authentication;
 import org.springframework.web.bind.annotation.*;
-
+import com.nithin.ridebooking.dto.PageResponse;
+import com.nithin.ridebooking.entity.RideStatus;
 @RestController
 @RequestMapping("/api/rides")
 @RequiredArgsConstructor
@@ -53,5 +54,12 @@ public class RideController {
     @PutMapping("/{id}/complete")
     public RideResponse completeRide(@PathVariable Long id, Authentication authentication) {
         return rideService.completeRide(authentication.getName(), id);
+    }
+    @GetMapping("/history")
+    public PageResponse<RideResponse> history(@RequestParam(defaultValue = "0") int page,
+                                              @RequestParam(defaultValue = "10") int size,
+                                              @RequestParam(required = false) RideStatus status,
+                                              Authentication authentication) {
+        return rideService.history(authentication.getName(), status, page, size);
     }
 }
