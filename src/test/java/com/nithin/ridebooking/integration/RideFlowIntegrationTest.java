@@ -1,5 +1,11 @@
 package com.nithin.ridebooking.integration;
-
+import com.nithin.ridebooking.security.RateLimitFilter;
+import org.springframework.http.MediaType;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 import com.jayway.jsonpath.JsonPath;
 import com.nithin.ridebooking.repository.DriverRepository;
 import com.nithin.ridebooking.repository.RideRepository;
@@ -41,6 +47,7 @@ class RideFlowIntegrationTest {
     @Autowired private UserRepository userRepository;
     @Autowired private RatingRepository ratingRepository;
     @Autowired private PaymentRepository paymentRepository;
+    @Autowired private RateLimitFilter rateLimitFilter;
     @Value("${spring.datasource.url}")
     private String datasourceUrl;
 
@@ -52,8 +59,10 @@ class RideFlowIntegrationTest {
         assertThat(datasourceUrl)
                 .as("Integration tests must only run against the in-memory test database")
                 .startsWith("jdbc:h2:");
-
-        mockMvc = MockMvcBuilders.webAppContextSetup(context).apply(springSecurity()).build();
+        mockMvc = MockMvcBuilders.webAppContextSetup(context)
+                .addFilters(rateLimitFilter)
+                .apply(springSecurity())
+                .build();
         ratingRepository.deleteAllInBatch();
         paymentRepository.deleteAllInBatch();
         rideRepository.deleteAllInBatch();
@@ -185,6 +194,64 @@ class RideFlowIntegrationTest {
         doPost("/api/auth/login", null, """
                 {"email":"rider@test.com","password":"not-the-password"}""")
                 .andExpect(status().isUnauthorized());
+    }
+    @Test
+    void protectedEndpointsRejectRequestsWithoutAToken() throws Exception {
+        mockMvc.perform(get("/api/auth/me")).andExpect(status().isUnauthorized());
+        mockMvc.perform(get("/api/rides/history")).andExpect(status().isUnauthorized());
+        mockMvc.perform(get("/api/ratings/me")).andExpect(status().isUnauthorized());
+        mockMvc.perform(post("/api/rides/1/rating")
+                        .contentType(MediaType.APPLICATION_JSON).content("{\"stars\":5}"))
+                .andExpect(status().isUnauthorized());
+    }
+
+    @Test
+    void garbageTokenIsRejectedWith401NotAServerError() throws Exception {
+        mockMvc.perform(get("/api/auth/me").header("Authorization", "Bearer not.a.real.token"))
+                .andExpect(status().isUnauthorized());
+    }
+
+    @Test
+    void strangerCannotReadSomeoneElsesRide() throws Exception {
+        String riderToken = register("rider@test.com", "RIDER");
+        String strangerToken = register("stranger@test.com", "RIDER");
+        onlineDriver("near@test.com", "KA01AA0001", "DL-1", 12.9720, 77.5950);
+
+        String booked = doPost("/api/rides", riderToken, BOOKING)
+                .andExpect(status().isCreated())
+                .andReturn().getResponse().getContentAsString();
+        Number rideId = JsonPath.read(booked, "$.id");
+
+        doGet("/api/rides/" + rideId, strangerToken).andExpect(status().isForbidden());
+        doGet("/api/rides/" + rideId, riderToken).andExpect(status().isOk());
+    }
+
+    @Test
+    void adminRoleCannotBeSelfRegistered() throws Exception {
+        mockMvc.perform(post("/api/auth/register")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"name\":\"Evil Admin\",\"email\":\"evil@test.com\","
+                                + "\"password\":\"Passw0rd123\",\"role\":\"ADMIN\"}"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.message").value(org.hamcrest.Matchers.containsString("Admin")));
+    }
+
+    @Test
+    void loginIsBlockedAfterTooManyFailedAttempts() throws Exception {
+        String body = "{\"email\":\"ghost@test.com\",\"password\":\"wrong-password-1\"}";
+
+        // a separate address, so this test cannot lock out the other tests
+        for (int i = 0; i < 5; i++) {
+            mockMvc.perform(post("/api/auth/login")
+                            .contentType(MediaType.APPLICATION_JSON).content(body)
+                            .with(request -> { request.setRemoteAddr("10.9.9.9"); return request; }))
+                    .andExpect(status().isUnauthorized());
+        }
+        mockMvc.perform(post("/api/auth/login")
+                        .contentType(MediaType.APPLICATION_JSON).content(body)
+                        .with(request -> { request.setRemoteAddr("10.9.9.9"); return request; }))
+                .andExpect(status().isTooManyRequests())
+                .andExpect(header().exists("Retry-After"));
     }
 
     @Test

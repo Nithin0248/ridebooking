@@ -8,10 +8,26 @@ import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.security.access.AccessDeniedException;
 import java.util.LinkedHashMap;
 import java.util.Map;
-
+import org.springframework.web.ErrorResponse;
 @RestControllerAdvice
 public class GlobalExceptionHandler {
+	private static final org.slf4j.Logger UNEXPECTED_LOG =
+	        org.slf4j.LoggerFactory.getLogger(GlobalExceptionHandler.class);
 
+	@ExceptionHandler(Exception.class)
+	public ResponseEntity<Map<String, Object>> handleUnexpected(Exception ex) {
+	    // Framework errors such as 404, 405 and 415 already know their status: keep it
+	    if (ex instanceof ErrorResponse errorResponse) {
+	        HttpStatus status = HttpStatus.valueOf(errorResponse.getStatusCode().value());
+	        return build(status, status.getReasonPhrase());
+	    }
+	    if (ex instanceof org.springframework.security.core.AuthenticationException) {
+	        return build(HttpStatus.UNAUTHORIZED, "Authentication failed");
+	    }
+	    // Anything else is a bug: log the detail here, show the client nothing
+	    UNEXPECTED_LOG.error("Unexpected error", ex);
+	    return build(HttpStatus.INTERNAL_SERVER_ERROR, "Something went wrong. Please try again later.");
+	}
     @ExceptionHandler(ResourceNotFoundException.class)
     public ResponseEntity<Map<String, Object>> handleNotFound(ResourceNotFoundException ex) {
         return build(HttpStatus.NOT_FOUND, ex.getMessage());

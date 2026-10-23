@@ -22,6 +22,9 @@ public class AuthService {
 
     @Transactional
     public AuthResponse register(RegisterRequest request) {
+    	if (request.role() == Role.ADMIN) {
+    	    throw new BadRequestException("Admin accounts cannot be self-registered");
+    	}
         if (request.role() == Role.ADMIN) {
             throw new BadRequestException("Role must be RIDER or DRIVER");
         }
