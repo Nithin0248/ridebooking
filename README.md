@@ -8,9 +8,6 @@
 ![Docker](https://img.shields.io/badge/Docker-ready-2496ED)
 ![Stripe](https://img.shields.io/badge/Stripe-test%20mode-635BFF)
 
-**Live demo (health check):** `https://<your-service>.onrender.com/health`
-Hosted on a free plan: the first request after a quiet period can take about a minute while the server wakes up.
-
 ---
 
 ## Table of contents
