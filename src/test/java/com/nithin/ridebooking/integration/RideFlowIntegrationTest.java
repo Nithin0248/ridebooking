@@ -35,6 +35,26 @@ import jakarta.persistence.EntityManagerFactory;
 import org.hibernate.SessionFactory;
 import org.hibernate.stat.Statistics;
 import static org.assertj.core.api.Assertions.assertThat;
+import com.nithin.ridebooking.payment.PaymentGateway;
+import org.springframework.test.context.bean.override.mockito.MockitoBean;
+import org.springframework.test.web.servlet.ResultActions;
+
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.when;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 @SpringBootTest
 @ActiveProfiles("test")
 class RideFlowIntegrationTest {
@@ -52,6 +72,7 @@ class RideFlowIntegrationTest {
     @Autowired private PaymentRepository paymentRepository;
     @Autowired private RateLimitFilter rateLimitFilter;
     @Autowired private EntityManagerFactory entityManagerFactory;
+    @MockitoBean private PaymentGateway paymentGateway;
     @Value("${spring.datasource.url}")
     private String datasourceUrl;
 
@@ -73,7 +94,7 @@ class RideFlowIntegrationTest {
         driverRepository.deleteAllInBatch();
         userRepository.deleteAllInBatch();
     }
-
+    
     // ---------- the tests ----------
     @Test
     void ratingFlow_bothSidesRateOnceAndTheSummaryUpdates() throws Exception {
@@ -351,6 +372,125 @@ class RideFlowIntegrationTest {
                 .andExpect(jsonPath("$.durationMinutes").value(0))
                 .andExpect(jsonPath("$.total").value(80.0));
     }
+    @Test
+    void fullJourney_bookCompletePayGetReceiptAndRate() throws Exception {
+        when(paymentGateway.createIntent(anyLong(), anyString(), anyLong()))
+                .thenReturn(new PaymentGateway.IntentResult("pi_test_1", "secret_test_1"));
+        when(paymentGateway.parseWebhook(anyString(), anyString()))
+                .thenReturn(new PaymentGateway.WebhookEvent("payment_intent.succeeded", "pi_test_1"));
+
+        String riderToken = register("rider@test.com", "RIDER");
+        String strangerToken = register("stranger@test.com", "RIDER");
+        String driverToken = onlineDriver("near@test.com", "KA01AA0001", "DL-1", 12.9720, 77.5950);
+
+        // book
+        String booked = doPost("/api/rides", riderToken, BOOKING)
+                .andExpect(status().isCreated())
+                .andReturn().getResponse().getContentAsString();
+        Number rideId = JsonPath.read(booked, "$.id");
+
+        // privacy: a stranger cannot see this ride
+        doGet("/api/rides/" + rideId, strangerToken).andExpect(status().isForbidden());
+
+        // not allowed yet: paying or receipt before the ride is completed
+        bearerPost("/api/rides/" + rideId + "/payment", riderToken).andExpect(status().isBadRequest());
+
+        // ride lifecycle
+        doPut("/api/rides/" + rideId + "/start", driverToken, null)
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("IN_PROGRESS"));
+        doPut("/api/rides/" + rideId + "/complete", driverToken, null)
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("COMPLETED"));
+
+        // a finished ride cannot be cancelled
+        doPut("/api/rides/" + rideId + "/cancel", riderToken, null)
+                .andExpect(status().is4xxClientError());
+
+        // payment: create, Stripe calls the webhook, status becomes SUCCEEDED
+        bearerPost("/api/rides/" + rideId + "/payment", riderToken)
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.status").value("PENDING"));
+        mockMvc.perform(post("/api/payments/webhook")
+                        .header("Stripe-Signature", "t=1,v1=fake")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{}"))
+                .andExpect(status().isOk());
+        bearerGet("/api/rides/" + rideId + "/payment", riderToken)
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("SUCCEEDED"));
+        bearerPost("/api/rides/" + rideId + "/payment", riderToken)
+                .andExpect(status().isBadRequest());          // already paid
+
+        // receipt: JSON and a real PDF
+        bearerGet("/api/rides/" + rideId + "/receipt", riderToken).andExpect(status().isOk());
+        byte[] pdf = bearerGet("/api/rides/" + rideId + "/receipt/pdf", riderToken)
+                .andExpect(status().isOk())
+                .andReturn().getResponse().getContentAsByteArray();
+        assertThat(new String(pdf, 0, 4)).isEqualTo("%PDF");
+
+        // both sides rate
+        doPost("/api/rides/" + rideId + "/rating", riderToken, "{\"stars\":5,\"comment\":\"Great\"}")
+                .andExpect(status().isCreated());
+        doPost("/api/rides/" + rideId + "/rating", driverToken, "{\"stars\":4}")
+                .andExpect(status().isCreated());
+
+        // history shows the finished ride
+        doGet("/api/rides/history?page=0&size=10", riderToken)
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.content.length()").value(1))
+                .andExpect(jsonPath("$.content[0].status").value("COMPLETED"));
+    }
+    @Test
+    void twoRidersRacingForOneDriverCannotBothGetThem() throws Exception {
+        String riderA = register("racea@test.com", "RIDER");
+        String riderB = register("raceb@test.com", "RIDER");
+        onlineDriver("only@test.com", "KA01AA0009", "DL-9", 12.9720, 77.5950);
+
+        ExecutorService pool = Executors.newFixedThreadPool(2);
+        CountDownLatch go = new CountDownLatch(1);
+        List<Future<String>> results = new ArrayList<>();
+        for (String token : List.of(riderA, riderB)) {
+            results.add(pool.submit(() -> {
+                go.await();                                   // both threads start together
+                return doPost("/api/rides", token, BOOKING)
+                        .andReturn().getResponse().getContentAsString();
+            }));
+        }
+        go.countDown();
+
+        int rideWithDriver = 0;
+        for (Future<String> result : results) {
+            String body = result.get(20, TimeUnit.SECONDS);
+            try {
+                Object driverId = JsonPath.read(body, "$.driverId");
+                if (driverId != null) {
+                    rideWithDriver++;
+                }
+            } catch (Exception noDriverInResponse) {
+                // an error body or a ride without a driver: not an assignment
+            }
+        }
+        pool.shutdown();
+
+        assertThat(rideWithDriver).isEqualTo(1);
+    }
+    @Test
+    void wrongPeopleCannotDriveTheRideLifecycle() throws Exception {
+        String riderToken = register("rider@test.com", "RIDER");
+        onlineDriver("near@test.com", "KA01AA0001", "DL-1", 12.9720, 77.5950);
+        String otherDriverToken = onlineDriver("other@test.com", "KA01AA0002", "DL-2", 13.5, 78.5);
+
+        String booked = doPost("/api/rides", riderToken, BOOKING)
+                .andExpect(status().isCreated())
+                .andReturn().getResponse().getContentAsString();
+        Number rideId = JsonPath.read(booked, "$.id");
+
+        doPut("/api/rides/" + rideId + "/start", riderToken, null)
+                .andExpect(status().is4xxClientError());       // a rider cannot start
+        doPut("/api/rides/" + rideId + "/start", otherDriverToken, null)
+                .andExpect(status().is4xxClientError());       // another driver cannot start
+    }
 
     // ---------- helpers ----------
 
@@ -387,7 +527,13 @@ class RideFlowIntegrationTest {
         }
         return mockMvc.perform(request);
     }
+    private ResultActions bearerGet(String url, String token) throws Exception {
+        return mockMvc.perform(get(url).header("Authorization", "Bearer " + token));
+    }
 
+    private ResultActions bearerPost(String url, String token) throws Exception {
+        return mockMvc.perform(post(url).header("Authorization", "Bearer " + token));
+    }
     private ResultActions doGet(String url, String token) throws Exception {
         return send(get(url), token, null);
     }
