@@ -31,7 +31,10 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.put;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
-
+import jakarta.persistence.EntityManagerFactory;
+import org.hibernate.SessionFactory;
+import org.hibernate.stat.Statistics;
+import static org.assertj.core.api.Assertions.assertThat;
 @SpringBootTest
 @ActiveProfiles("test")
 class RideFlowIntegrationTest {
@@ -48,6 +51,7 @@ class RideFlowIntegrationTest {
     @Autowired private RatingRepository ratingRepository;
     @Autowired private PaymentRepository paymentRepository;
     @Autowired private RateLimitFilter rateLimitFilter;
+    @Autowired private EntityManagerFactory entityManagerFactory;
     @Value("${spring.datasource.url}")
     private String datasourceUrl;
 
@@ -252,6 +256,66 @@ class RideFlowIntegrationTest {
                         .with(request -> { request.setRemoteAddr("10.9.9.9"); return request; }))
                 .andExpect(status().isTooManyRequests())
                 .andExpect(header().exists("Retry-After"));
+    }
+    @Test
+    void rideHistoryRunsAFixedNumberOfQueriesNoMatterHowManyRides() throws Exception {
+        String riderToken = register("rider@test.com", "RIDER");
+        String driverToken = onlineDriver("near@test.com", "KA01AA0001", "DL-1", 12.9720, 77.5950);
+
+        for (int i = 0; i < 5; i++) {
+            // put the driver back at the pickup area before every booking
+            doPut("/api/drivers/me/location", driverToken, "{\"latitude\":12.9720,\"longitude\":77.5950}")
+                    .andExpect(status().isOk());
+
+            String booked = doPost("/api/rides", riderToken, BOOKING)
+                    .andExpect(status().isCreated())
+                    .andReturn().getResponse().getContentAsString();
+            Number rideId = JsonPath.read(booked, "$.id");
+
+            var start = doPut("/api/rides/" + rideId + "/start", driverToken, null).andReturn().getResponse();
+            assertThat(start.getStatus())
+                    .as("ride " + (i + 1) + ": booking said " + booked + " / start said " + start.getContentAsString())
+                    .isEqualTo(200);
+
+            doPut("/api/rides/" + rideId + "/complete", driverToken, null).andExpect(status().isOk());
+        }
+
+        Statistics statistics = entityManagerFactory.unwrap(SessionFactory.class).getStatistics();
+        assertThat(statistics.isStatisticsEnabled()).isTrue();   // otherwise the count below proves nothing
+        statistics.clear();
+
+        doGet("/api/rides/history?page=0&size=10", riderToken)
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.content.length()").value(5));
+
+        // user lookups + page + count. An N+1 bug would run 15 or more statements for 5 rides
+        assertThat(statistics.getPrepareStatementCount()).isLessThanOrEqualTo(8);
+    }
+
+    @Test
+    void ratingSummaryCacheIsClearedWhenANewRatingArrives() throws Exception {
+        String riderToken = register("rider@test.com", "RIDER");
+        String driverToken = onlineDriver("near@test.com", "KA01AA0001", "DL-1", 12.9720, 77.5950);
+
+        String booked = doPost("/api/rides", riderToken, BOOKING)
+                .andExpect(status().isCreated())
+                .andReturn().getResponse().getContentAsString();
+        Number rideId = JsonPath.read(booked, "$.id");
+        Number driverId = JsonPath.read(booked, "$.driverId");
+
+        // this read fills the cache with "no ratings yet"
+        doGet("/api/drivers/" + driverId + "/rating", riderToken)
+                .andExpect(jsonPath("$.ratingCount").value(0));
+
+        doPut("/api/rides/" + rideId + "/start", driverToken, null).andExpect(status().isOk());
+        doPut("/api/rides/" + rideId + "/complete", driverToken, null).andExpect(status().isOk());
+        doPost("/api/rides/" + rideId + "/rating", riderToken, "{\"stars\":5}")
+                .andExpect(status().isCreated());
+
+        // without the eviction this would still say 0
+        doGet("/api/drivers/" + driverId + "/rating", riderToken)
+                .andExpect(jsonPath("$.ratingCount").value(1))
+                .andExpect(jsonPath("$.averageStars").value(5.0));
     }
 
     @Test

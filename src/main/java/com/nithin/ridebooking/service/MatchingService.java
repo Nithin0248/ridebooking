@@ -2,6 +2,7 @@ package com.nithin.ridebooking.service;
 
 import com.nithin.ridebooking.entity.Driver;
 import com.nithin.ridebooking.repository.DriverRepository;
+import com.nithin.ridebooking.util.GeoBox;
 import com.nithin.ridebooking.util.GeoUtils;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
@@ -26,14 +27,20 @@ public class MatchingService {
     @Transactional
     public Optional<Driver> findAndClaimNearestDriver(double pickupLat, double pickupLng) {
 
-        List<Driver> candidates = driverRepository.findByAvailableTrue().stream()
-                .filter(d -> d.getCurrentLatitude() != null && d.getCurrentLongitude() != null)
-                .filter(d -> distanceKm(d, pickupLat, pickupLng) <= maxRadiusKm)
-                .sorted(Comparator.comparingDouble(d -> distanceKm(d, pickupLat, pickupLng)))
+        // 1. The database narrows the list to drivers inside a box around the pickup point
+        GeoBox box = GeoBox.around(pickupLat, pickupLng, maxRadiusKm);
+
+        // 2. Java keeps only drivers with a location inside the real radius, nearest first
+        List<Driver> candidates = driverRepository
+                .findAvailableWithin(box.minLat(), box.maxLat(), box.minLng(), box.maxLng())
+                .stream()
+                .filter(driver -> driver.getCurrentLatitude() != null && driver.getCurrentLongitude() != null)
+                .filter(driver -> distanceKm(driver, pickupLat, pickupLng) <= maxRadiusKm)
+                .sorted(Comparator.comparingDouble(driver -> distanceKm(driver, pickupLat, pickupLng)))
                 .toList();
 
+        // 3. Try the nearest first. Only one booking can win a driver, even if several run at once
         for (Driver driver : candidates) {
-            // Only one booking can win this driver, even if several run at the same moment
             if (driverRepository.claimIfAvailable(driver.getId()) == 1) {
                 return Optional.of(driver);
             }

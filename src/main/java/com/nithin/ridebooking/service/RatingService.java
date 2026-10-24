@@ -17,7 +17,8 @@ import org.springframework.data.domain.Sort;
 import org.springframework.security.access.AccessDeniedException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
-
+import org.springframework.cache.annotation.CacheEvict;
+import org.springframework.cache.annotation.Cacheable;
 import java.util.List;
 
 @Service
@@ -32,7 +33,8 @@ public class RatingService {
     private final RideRepository rideRepository;
     private final UserRepository userRepository;
     private final DriverRepository driverRepository;
-
+    
+    @CacheEvict(value = "driverRatings", allEntries = true)
     @Transactional
     public RatingResponse rateRide(String email, Long rideId, RatingRequest request) {
         User caller = findUser(email);
@@ -97,7 +99,7 @@ public class RatingService {
     public RatingSummary getMySummary(String email) {
         return summaryFor(findUser(email).getId());
     }
-
+    @Cacheable(value = "driverRatings", key = "#driverId")
     @Transactional(readOnly = true)
     public RatingSummary getDriverSummary(Long driverId) {
         return summaryFor(findDriver(driverId).getUser().getId());

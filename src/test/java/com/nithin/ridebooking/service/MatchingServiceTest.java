@@ -12,7 +12,11 @@ import java.util.List;
 import java.util.Optional;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.mockito.Mockito.*;
+import static org.mockito.ArgumentMatchers.anyDouble;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 @ExtendWith(MockitoExtension.class)
 class MatchingServiceTest {
@@ -20,8 +24,7 @@ class MatchingServiceTest {
     private static final double PICKUP_LAT = 12.9716;
     private static final double PICKUP_LNG = 77.5946;
 
-    @Mock
-    private DriverRepository driverRepository;
+    @Mock private DriverRepository driverRepository;
 
     private MatchingService matchingService;
 
@@ -30,17 +33,23 @@ class MatchingServiceTest {
         matchingService = new MatchingService(driverRepository, 5.0);   // 5 km radius
     }
 
-    private Driver driver(Long id, Double lat, Double lng) {
-        return Driver.builder().id(id).currentLatitude(lat).currentLongitude(lng)
-                .available(true).build();
+    private Driver driver(long id, Double lat, Double lng) {
+        return Driver.builder().id(id).currentLatitude(lat).currentLongitude(lng).build();
+    }
+
+    private Driver nearDriver()    { return driver(1L, PICKUP_LAT + 0.005, PICKUP_LNG); }   // about 0.5 km away
+    private Driver farDriver()     { return driver(2L, PICKUP_LAT + 0.030, PICKUP_LNG); }   // about 3.3 km away
+    private Driver outsideDriver() { return driver(3L, PICKUP_LAT + 0.200, PICKUP_LNG); }   // about 22 km away
+
+    // what the database query returns for the box around the pickup point
+    private void databaseReturns(Driver... drivers) {
+        when(driverRepository.findAvailableWithin(anyDouble(), anyDouble(), anyDouble(), anyDouble()))
+                .thenReturn(List.of(drivers));
     }
 
     @Test
-    void nearestDriverIsChosen() {
-        Driver near = driver(1L, 12.9720, 77.5950);   // about 0.06 km away
-        Driver mid = driver(2L, 12.9900, 77.6100);    // about 2.6 km away
-        Driver far = driver(3L, 13.1000, 77.7000);    // about 18 km away
-        when(driverRepository.findByAvailableTrue()).thenReturn(List.of(far, mid, near));
+    void nearestDriverIsClaimedFirst() {
+        databaseReturns(farDriver(), nearDriver());      // far one listed first on purpose
         when(driverRepository.claimIfAvailable(1L)).thenReturn(1);
 
         Optional<Driver> result = matchingService.findAndClaimNearestDriver(PICKUP_LAT, PICKUP_LNG);
@@ -52,9 +61,7 @@ class MatchingServiceTest {
 
     @Test
     void nextNearestDriverIsUsedWhenTheNearestWasJustTaken() {
-        Driver near = driver(1L, 12.9720, 77.5950);
-        Driver mid = driver(2L, 12.9900, 77.6100);
-        when(driverRepository.findByAvailableTrue()).thenReturn(List.of(near, mid));
+        databaseReturns(nearDriver(), farDriver());
         when(driverRepository.claimIfAvailable(1L)).thenReturn(0);   // someone else claimed it first
         when(driverRepository.claimIfAvailable(2L)).thenReturn(1);
 
@@ -66,8 +73,7 @@ class MatchingServiceTest {
 
     @Test
     void driversOutsideTheRadiusAreIgnored() {
-        Driver far = driver(3L, 13.1000, 77.7000);
-        when(driverRepository.findByAvailableTrue()).thenReturn(List.of(far));
+        databaseReturns(outsideDriver());
 
         Optional<Driver> result = matchingService.findAndClaimNearestDriver(PICKUP_LAT, PICKUP_LNG);
 
@@ -76,9 +82,8 @@ class MatchingServiceTest {
     }
 
     @Test
-    void driversWithoutALocationAreIgnored() {
-        Driver unknown = driver(4L, null, null);
-        when(driverRepository.findByAvailableTrue()).thenReturn(List.of(unknown));
+    void noOnlineDriversMeansNoMatch() {
+        databaseReturns();
 
         Optional<Driver> result = matchingService.findAndClaimNearestDriver(PICKUP_LAT, PICKUP_LNG);
 
@@ -86,9 +91,12 @@ class MatchingServiceTest {
     }
 
     @Test
-    void noOnlineDriversMeansNoMatch() {
-        when(driverRepository.findByAvailableTrue()).thenReturn(List.of());
+    void driversWithoutALocationAreIgnored() {
+        databaseReturns(driver(4L, null, null));
 
-        assertThat(matchingService.findAndClaimNearestDriver(PICKUP_LAT, PICKUP_LNG)).isEmpty();
+        Optional<Driver> result = matchingService.findAndClaimNearestDriver(PICKUP_LAT, PICKUP_LNG);
+
+        assertThat(result).isEmpty();
+        verify(driverRepository, never()).claimIfAvailable(anyLong());
     }
 }

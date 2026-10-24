@@ -25,4 +25,14 @@ public interface DriverRepository extends JpaRepository<Driver, Long> {
     @Modifying
     @Query("update Driver d set d.available = false where d.id = :id and d.available = true")
     int claimIfAvailable(@Param("id") Long id);
+    @Query("""
+            select d from Driver d
+            where d.available = true
+              and d.currentLatitude  between :minLat and :maxLat
+              and d.currentLongitude between :minLng and :maxLng
+            """)
+    List<Driver> findAvailableWithin(@Param("minLat") double minLat,
+                                     @Param("maxLat") double maxLat,
+                                     @Param("minLng") double minLng,
+                                     @Param("maxLng") double maxLng);
 }
